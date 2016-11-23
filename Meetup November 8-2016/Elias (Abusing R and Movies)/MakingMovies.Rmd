@@ -1,0 +1,166 @@
+---
+title: "Creating video animations in R"
+author: "Elias J Willemse"
+date: "08 November 2016 (ejwillemse@gmail.com)"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+This document illustrates how to generate simple animation videos using R, using the `vehicleGPS.csv` sample data. To generate the videos, a bunch of `.png` files will be created. These will be saved in the current workspace but can be moved to another folder to keep the working directory clean. Another good place to start (and which got me started) is this tutorial: https://www.r-bloggers.com/search/animation/
+
+## Required librariers
+
+The following libraries are required to generate the video. If necessary, use the `install.packages()` command to install whatever is missing.
+
+```{r, results='show',message=FALSE}
+library(gridExtra)
+library(grid)
+library(ggmap)
+library(ggplot2)
+```
+
+In addition to the above, `ffmpeg` is also required. For information on downloading and installing it, visit: https://ffmpeg.org/download.html. I suspect the most difficult parts in getting this document up and running are to install all the required libraries as well as `ffmpeg`
+
+## Loading the date
+
+First we load the `vehicleGPS.csv` file and we convert `time` into a R time object; currently it is just a character.
+```{r}
+vehicle.frame = read.csv('vehicleGPS.csv')
+vehicle.frame$time = strptime(vehicle.frame$time, format = "%Y-%m-%d %H:%M:%S")
+```
+
+## Retrieving the base map
+
+Once we have the data a function is used to retrieve the map covering the all the GPS points. This requires an internet connection, and firewalls may also pose a problem.
+```{r}
+returnBaseMap <- function(vehicle.frame)
+{
+  # The min and max x and y coordinates are retrieved.
+  minX = min(vehicle.frame$pos_x) 
+  minY = min(vehicle.frame$pos_y) 
+  maxX = max(vehicle.frame$pos_x) 
+  maxY = max(vehicle.frame$pos_y) 
+  
+  # The area is increased by 5% to prevent objects from being placed
+  # too close to the maps borders.
+  jiggle_X = (maxX - minX)*0.05
+  jiggle_Y = (maxY - minY)*0.05
+  
+  minX = minX - jiggle_X
+  minY = minY - jiggle_Y
+  maxX = maxX + jiggle_X
+  maxY = maxY + jiggle_Y
+  
+  # ggmap is used to pull the map.
+  baseMap = get_map(source = "osm", location = c(minX, minY, maxX, maxY), color = "bw")
+  
+  # then the map can be plotted
+  baseMapPlot = ggmap(baseMap)
+  return(baseMapPlot)
+}
+baseMapPlot = returnBaseMap(vehicle.frame)
+
+# if successfully pulled, the next line will show the figure.
+baseMapPlot
+```
+
+The map will be the background on which we plot our GPS records. 
+
+## Plotting data on the basemap
+
+As a tester lets first plot all the GPS points on the map. This requires `ggplot2`.
+```{r}
+baseMapPlotWithPoints = baseMapPlot + geom_point(data = vehicle.frame, aes(x = pos_x, y = pos_y))
+baseMapPlotWithPoints
+```
+
+Next, lets add some line segments.
+```{r}
+baseMapPlotWithPointsLines = baseMapPlotWithPoints + geom_path(data = vehicle.frame, aes(x = pos_x, y = pos_y))
+baseMapPlotWithPointsLines
+```
+
+For future use we can combine these to calls into a function.
+```{r}
+generateGPStraces <- function(baseMapPlot, vehicle.frame)
+{
+  baseMapPlotWithPoints = baseMapPlot + geom_point(data = vehicle.frame, aes(x = pos_x, y = pos_y))
+  baseMapPlotWithPoints
+  
+  baseMapPlotWithPointsLines = baseMapPlotWithPoints + geom_path(data = vehicle.frame, aes(x = pos_x, y = pos_y))
+  baseMapPlotWithPointsLines
+  return(baseMapPlotWithPointsLines)
+}
+baseMapPlotWithPointsLines = generateGPStraces(baseMapPlot, vehicle.frame)
+```
+
+Using the `ggsave` command, we are going to save the image as a tester.
+```{r}
+ggsave(baseMapPlotWithPointsLines, file = 'testSave.png', width = 20, height = 20, units = 'cm')
+```
+There should be now be a `testSave.png` image in the working directory.
+
+## Creating the movie
+
+Creating the movie consists of a few steps. First we are going to subset the data, draw a plot of the subset, and save the subset. Once all the plots have been created and saved we are going to call `ffmpeg` to combine all the `.png` files into a single movie.
+
+Step one then is to create the images for the movie. The following function creates 30 frames with 5 minute intervals. This may take a while, so grab a cup of coffee. `timeInterval` can be reduced to produce smoother and longer movies. To create a video of the whole day, set `test = F` when calling the function.
+```{r, results='show',message=FALSE}
+create_movie <- function(basePlot, vehicle.frame, test = T, timeInterval = 5*60)
+{
+  startTime = min(vehicle.frame$time)
+  endTime = max(vehicle.frame$time)
+  timeSpan = endTime - startTime
+  
+  # the time span needs to be converted to seconds
+  timeSpanSeconds = 60*60*as.numeric(timeSpan)
+  
+  # the number of frames using the second intervals
+  if (test == T){nFrames = 30}else{nFrames = ceiling(timeSpanSeconds/timeInterval)}
+  
+  for (iFrame in c(1:nFrames))
+  {
+    frameTimeLowerLimit = startTime + (iFrame - 1)*timeInterval
+    frameTimeUpperLimit = startTime + iFrame*timeInterval
+    timeframedata = subset(vehicle.frame, time > frameTimeLowerLimit & time < frameTimeUpperLimit)
+    framePicture = generateGPStraces(baseMapPlot, timeframedata)
+    outputFileString = sprintf('frame_%06d.png', iFrame)
+    
+    # The print command below is useful to display progess, but it makes the html output doc a bit messy.
+    # Feel free to remove the commend if you're just running the code and not compiling the html document.
+    
+    #print(paste('Creating frame ' ,iFrame, 'out of', nFrames, 'and saving it as',outputFileString))
+    
+    ggsave(framePicture, filename = outputFileString, width = 20, height = 20, units = 'cm')
+  }
+}
+create_movie(baseMapPlot, vehicle.frame, test = T, timeInterval = 5*60)
+```
+There should bow a bunch of `.png` files in the working directory. The final step is to call `ffmpeg` to create a movie from the frames. The following function does all that in R. What is important is the `pngFiles` should be the same as `outputFileString` in the previous function. It may take a while to generate the video, depending on the number of frames.
+```{r}
+genFFmpeg2 <- function(pngFiles = 'frame_%06d.png', 
+                       outFile = "video.mp4", 
+                       width = 1200, height = 1200, 
+                       frameRate = 2.5, crf = 20, r = 30)
+{
+  systemCommand = paste("ffmpeg -framerate ", frameRate, ' -i ',
+                        pngFiles," -s:v ",width,"x",
+                        height," -c:v libx264 -profile:v high -crf ",
+                        crf," -pix_fmt yuv420p -r ",r," ",
+                        outFile, sep="")
+  
+  system(systemCommand, input = "y")
+}
+genFFmpeg2()
+```
+Feel free to play around a bit, especially with the `timeInterval` to make it a bit smoother. The only downside is that it takes more time to generate all the frames and to create the movie.
+
+Hope the above helps! And have fun!
+
+Elias
+
